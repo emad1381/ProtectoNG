@@ -273,24 +273,22 @@ class ProtectoVpnService : VpnService() {
                 val fdInt = vpnInterface!!.fd
                 LogsModule.info("Tunnel", "Original TUN file descriptor: $fdInt")
 
-                // dup() creates a new fd that does NOT inherit FD_CLOEXEC (by POSIX spec).
-                // This is more reliable than fcntl(F_SETFD) for making fds inheritable across exec().
-                val inheritableFd = try {
-                    val originalFd = FileDescriptor()
-                    val setMethod = FileDescriptor::class.java.getDeclaredMethod("setInt\$", Int::class.java)
-                    setMethod.isAccessible = true
-                    setMethod.invoke(originalFd, fdInt)
-
-                    val dupFd = Os.dup(originalFd)
-
-                    val getMethod = FileDescriptor::class.java.getDeclaredMethod("getInt\$")
-                    getMethod.isAccessible = true
-                    val dupInt = getMethod.invoke(dupFd) as Int
-                    LogsModule.info("Tunnel", "Created inheritable dup of TUN fd: $fdInt -> $dupInt (no FD_CLOEXEC)")
-                    dupInt
+                // Use ParcelFileDescriptor.dup() which creates a new fd without FD_CLOEXEC.
+                // By POSIX, dup() never copies FD_CLOEXEC, so the new fd IS inheritable by child processes.
+                // This is the official Android API approach, no reflection needed.
+                val inheritablePfd: ParcelFileDescriptor? = try {
+                    ParcelFileDescriptor.fromFd(fdInt).also {
+                        LogsModule.info("Tunnel", "Created inheritable dup via ParcelFileDescriptor.fromFd: $fdInt -> ${it.fd} (no FD_CLOEXEC)")
+                    }
                 } catch (e: Exception) {
-                    LogsModule.warning("Tunnel", "Could not dup TUN fd ($fdInt): ${e.message}. Falling back to original.")
-                    // Fallback: try to clear FD_CLOEXEC on original
+                    LogsModule.warning("Tunnel", "Could not dup TUN fd via PFD ($fdInt): ${e.message}. Falling back.")
+                    null
+                }
+
+                val inheritableFd: Int = if (inheritablePfd != null) {
+                    inheritablePfd.fd
+                } else {
+                    // Fallback: clear FD_CLOEXEC on original fd
                     try {
                         val fdObj = vpnInterface!!.fileDescriptor
                         val flags = Os.fcntlInt(fdObj, OsConstants.F_GETFD, 0)
