@@ -43,24 +43,39 @@ jobs:
             -storepass testpass -keypass testpass \
             -dname "CN=Test, O=Test, L=Test, S=Test, C=US"
 
-      - name: Download Xray Core Binaries
+      - name: Download Xray and tun2socks Core Binaries
         run: |
           mkdir -p app/src/main/assets
           
-          echo "Downloading arm64-v8a..."
+          echo "Downloading Xray arm64-v8a..."
           curl -L -o xray-arm64.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-android-arm64-v8a.zip
           unzip -p xray-arm64.zip xray > app/src/main/assets/xray_arm64-v8a
           rm xray-arm64.zip
 
-          echo "Downloading armeabi-v7a..."
+          echo "Downloading Xray armeabi-v7a..."
           curl -L -o xray-arm32.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-arm32-v7a.zip
           unzip -p xray-arm32.zip xray > app/src/main/assets/xray_armeabi-v7a
           rm xray-arm32.zip
 
-          echo "Downloading x86_64..."
+          echo "Downloading Xray x86_64..."
           curl -L -o xray-x64.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-64.zip
           unzip -p xray-x64.zip xray > app/src/main/assets/xray_x86_64
           rm xray-x64.zip
+
+          echo "Downloading tun2socks arm64-v8a..."
+          curl -L -o t2s-arm64.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-arm64.zip
+          unzip -p t2s-arm64.zip tun2socks-linux-arm64 > app/src/main/assets/tun2socks_arm64-v8a
+          rm t2s-arm64.zip
+
+          echo "Downloading tun2socks armeabi-v7a..."
+          curl -L -o t2s-arm32.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-armv7.zip
+          unzip -p t2s-arm32.zip tun2socks-linux-armv7 > app/src/main/assets/tun2socks_armeabi-v7a
+          rm t2s-arm32.zip
+
+          echo "Downloading tun2socks x86_64..."
+          curl -L -o t2s-x64.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-amd64.zip
+          unzip -p t2s-x64.zip tun2socks-linux-amd64 > app/src/main/assets/tun2socks_x86_64
+          rm t2s-x64.zip
 
           ls -l app/src/main/assets/
 

@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.IOException
+import java.io.File
+import android.system.Os
+import android.system.OsConstants
 
 object VpnModuleManager {
     private val _serviceState = MutableStateFlow(VpnState.IDLE)
@@ -114,6 +117,9 @@ class ProtectoVpnService : VpnService() {
     private val channelId = "protecto_vpn_channel"
     private var tunThread: Thread? = null
     private var isTunRunning = false
+
+    private var tun2socksProcess: Process? = null
+    private var tun2socksLogThread: Thread? = null
 
     companion object {
         const val ACTION_CONNECT = "com.example.protecto.CONNECT"
@@ -249,6 +255,14 @@ class ProtectoVpnService : VpnService() {
                 .addDnsServer("1.1.1.1")
                 .setMtu(1400)
 
+            // Exclude our own application from VPN routing to avoid loops!
+            try {
+                builder.addDisallowedApplication(packageName)
+                LogsModule.info("Tunnel", "[Tunnel Creation] Excluded $packageName from VPN to prevent recursive loops.")
+            } catch (e: Exception) {
+                LogsModule.error("Tunnel", "[Tunnel Creation] Failed to exclude package: ${e.message}")
+            }
+
             vpnInterface = builder.establish()
             
             if (vpnInterface != null) {
@@ -256,8 +270,18 @@ class ProtectoVpnService : VpnService() {
                 LogsModule.info("DNS", "[DNS Routing] Registered primary DNS resolver 1.1.1.1. DNS leak protection active. Route-to-tunnel operational.")
                 LogsModule.info("Routing", "[Network Routing] Catch-all routing rule (0.0.0.0/0) successfully redirected to TUN interface. Outbound traffic successfully captured.")
                 
-                // Start packet forwarder in background thread
-                startTunPacketForwarder(vpnInterface!!)
+                val fdObj = vpnInterface!!.fileDescriptor
+                val fdInt = vpnInterface!!.fd
+                try {
+                    val flags = Os.fcntlInt(fdObj, OsConstants.F_GETFD, 0)
+                    Os.fcntlInt(fdObj, OsConstants.F_SETFD, flags and OsConstants.FD_CLOEXEC.inv())
+                    LogsModule.info("Tunnel", "Cleared FD_CLOEXEC flag on TUN file descriptor $fdInt successfully.")
+                } catch (e: Exception) {
+                    LogsModule.error("Tunnel", "Failed to clear FD_CLOEXEC: ${e.message}")
+                }
+
+                // Start native tun2socks process
+                startTun2Socks(fdInt)
             } else {
                 LogsModule.warning("Tunnel", "[Tunnel Creation] VpnService.Builder returned a null interface. Initializing local TCP/UDP routing overlay mode.")
             }
@@ -289,560 +313,99 @@ class ProtectoVpnService : VpnService() {
         }
     }
 
-    private val tcpSessions = java.util.concurrent.ConcurrentHashMap<String, TcpSession>()
-    
-    private class TcpSession(
-        val clientIp: ByteArray,
-        val serverIp: ByteArray,
-        val clientPort: Int,
-        val serverPort: Int,
-        var clientSeq: Long,
-        var clientAck: Long,
-        var mySeq: Long,
-        var myAck: Long,
-        var socket: java.net.Socket? = null,
-        var isClosed: Boolean = false
-    )
-
-    private fun startTunPacketForwarder(pfd: ParcelFileDescriptor) {
-        isTunRunning = true
-        tcpSessions.clear()
-        
-        tunThread = Thread {
-            val inputStream = java.io.FileInputStream(pfd.fileDescriptor)
-            val outputStream = java.io.FileOutputStream(pfd.fileDescriptor)
-            val buffer = ByteArray(32768)
-            var packetCount = 0
-            
-            try {
-                while (isTunRunning) {
-                    val length = inputStream.read(buffer)
-                    if (length > 0) {
-                        packetCount++
-                        StatisticsModule.tickUpTunnelTraffic(length.toLong(), 0L)
-                        
-                        val ipVersion = (buffer[0].toInt() ushr 4) and 0x0F
-                        if (ipVersion == 4 && length >= 20) {
-                            val ihl = (buffer[0].toInt() and 0x0F) * 4
-                            val protocol = buffer[9].toInt() and 0xFF
-                            
-                            val srcIp = "${buffer[12].toInt() and 0xFF}.${buffer[13].toInt() and 0xFF}.${buffer[14].toInt() and 0xFF}.${buffer[15].toInt() and 0xFF}"
-                            val dstIp = "${buffer[16].toInt() and 0xFF}.${buffer[17].toInt() and 0xFF}.${buffer[18].toInt() and 0xFF}.${buffer[19].toInt() and 0xFF}"
-                            
-                            if (protocol == 17 && length >= ihl + 8) { // UDP
-                                val srcPort = ((buffer[ihl].toInt() and 0xFF) shl 8) or (buffer[ihl + 1].toInt() and 0xFF)
-                                val dstPort = ((buffer[ihl + 2].toInt() and 0xFF) shl 8) or (buffer[ihl + 3].toInt() and 0xFF)
-                                
-                                if (dstPort == 53) {
-                                    if (packetCount % 30 == 1) {
-                                        LogsModule.info("DNS", "[TUN DNS] Captured DNS packet entering TUN. Host: $dstIp:$dstPort. Directing resolution to 1.1.1.1.")
-                                    }
-                                    forwardDnsPacket(buffer, ihl, length, outputStream)
-                                } else {
-                                    forwardUdpPacket(buffer, ihl, length, dstIp, dstPort, outputStream)
-                                }
-                            } else if (protocol == 6 && length >= ihl + 20) { // TCP
-                                val srcPort = ((buffer[ihl].toInt() and 0xFF) shl 8) or (buffer[ihl + 1].toInt() and 0xFF)
-                                val dstPort = ((buffer[ihl + 2].toInt() and 0xFF) shl 8) or (buffer[ihl + 3].toInt() and 0xFF)
-                                
-                                val flags = buffer[ihl + 13].toInt() and 0xFF
-                                val isSyn = (flags and 0x02) != 0
-                                val isFin = (flags and 0x01) != 0
-                                val isRst = (flags and 0x04) != 0
-                                
-                                val tcpKey = "$srcIp:$srcPort->$dstIp:$dstPort"
-                                
-                                if (isSyn) {
-                                    handleTcpSyn(buffer, ihl, length, srcIp, srcPort, dstIp, dstPort, outputStream, tcpKey)
-                                } else if (isFin || isRst) {
-                                    handleTcpClose(tcpKey)
-                                } else {
-                                    val tcpHeaderLen = ((buffer[ihl + 12].toInt() ushr 4) and 0x0F) * 4
-                                    val payloadLen = length - ihl - tcpHeaderLen
-                                    if (payloadLen > 0) {
-                                        handleTcpData(buffer, ihl, tcpHeaderLen, payloadLen, tcpKey, outputStream)
-                                        StatisticsModule.tickUpTunnelTraffic(0L, payloadLen.toLong())
-                                    }
-                                }
-                            }
-                        } else if (ipVersion == 6) {
-                            if (packetCount % 200 == 1) {
-                                LogsModule.info("Tunnel", "[TUN IPv6] Captured IPv6 routing event entering virtual TUN adapter.")
-                            }
-                        }
-                    } else if (length < 0) {
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                LogsModule.info("TUN", "TUN Packet Forwarder finished: ${e.message}")
-            } finally {
-                try { inputStream.close() } catch (e: Exception) {}
-                try { outputStream.close() } catch (e: Exception) {}
-            }
-        }.apply {
-            name = "ProtectoTunForwarder"
-            start()
-        }
-    }
-
-    private fun handleTcpSyn(
-        buf: ByteArray,
-        ihl: Int,
-        length: Int,
-        srcIp: String,
-        srcPort: Int,
-        dstIp: String,
-        dstPort: Int,
-        outStream: java.io.FileOutputStream,
-        key: String
-    ) {
-        val clientSeq = read32(buf, ihl + 4)
-        val session = TcpSession(
-            clientIp = buf.copyOfRange(12, 16),
-            serverIp = buf.copyOfRange(16, 20),
-            clientPort = srcPort,
-            serverPort = dstPort,
-            clientSeq = clientSeq,
-            clientAck = 0L,
-            mySeq = 10001L,
-            myAck = clientSeq + 1L
+    private fun startTun2Socks(fd: Int) {
+        val binDir = File(filesDir, "xray_bin")
+        val tun2socksBinary = File(binDir, "tun2socks")
+        val cmd = listOf(
+            tun2socksBinary.absolutePath,
+            "-device", "fd://$fd",
+            "-proxy", "socks5://127.0.0.1:10808",
+            "-loglevel", "warning"
         )
-        tcpSessions[key] = session
-        
-        // Prepare SYN-ACK response packet
-        val response = ByteArray(40)
-        response[0] = 0x45.toByte() // Vers: 4, IHL: 5
-        response[1] = 0x00.toByte() // TOS
-        write16(response, 2, 40) // Total length
-        write16(response, 4, 12345) // Identification
-        write16(response, 6, 0)
-        response[8] = 64.toByte() // TTL
-        response[9] = 6.toByte() // Protocol TCP
-        System.arraycopy(session.serverIp, 0, response, 12, 4)
-        System.arraycopy(session.clientIp, 0, response, 16, 4)
-        
-        write16(response, 20, dstPort) // Source Port
-        write16(response, 22, srcPort) // Dest Port
-        write32(response, 24, session.mySeq) // Seq Number
-        write32(response, 28, session.myAck) // Ack Number
-        response[32] = 0x50.toByte() // TCP Header Length: 20 bytes
-        response[33] = 0x12.toByte() // Flags: SYN | ACK
-        write16(response, 34, 65535) // Window Size
-        response[36] = 0
-        response[37] = 0
-        write16(response, 38, 0)
-        
-        val ipChecksum = calculateChecksum(response, 0, 20)
-        write16(response, 10, ipChecksum)
-        
-        val pseudoHeader = ByteArray(12 + 20)
-        System.arraycopy(session.serverIp, 0, pseudoHeader, 0, 4)
-        System.arraycopy(session.clientIp, 0, pseudoHeader, 4, 4)
-        pseudoHeader[8] = 0
-        pseudoHeader[9] = 6
-        write16(pseudoHeader, 10, 20)
-        System.arraycopy(response, 20, pseudoHeader, 12, 20)
-        val tcpChecksum = calculateChecksum(pseudoHeader, 0, pseudoHeader.size)
-        write16(response, 36, tcpChecksum)
-        
+        LogsModule.info("VPN", "Starting tun2socks command: ${cmd.joinToString(" ")}")
         try {
-            outStream.write(response)
-            outStream.flush()
+            val pb = ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
+            val proc = pb.start()
+            tun2socksProcess = proc
+            tun2socksLogThread = Thread {
+                try {
+                    val reader = java.io.BufferedReader(java.io.InputStreamReader(proc.inputStream))
+                    var line = reader.readLine()
+                    while (line != null) {
+                        LogsModule.info("tun2socks", line)
+                        line = reader.readLine()
+                    }
+                } catch (e: Exception) {}
+            }.apply {
+                name = "Tun2SocksLogCollector"
+                start()
+            }
         } catch (e: Exception) {
-            LogsModule.error("TCP", "TUN handshake TCP write-back error: ${e.message}")
+            LogsModule.error("VPN", "Failed to start tun2socks process: ${e.message}")
         }
-        
-        Thread {
-            try {
-                val socksSocket = java.net.Socket()
-                protect(socksSocket)
-                socksSocket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 3000)
-                
-                val out = socksSocket.getOutputStream()
-                val ins = socksSocket.getInputStream()
-                
-                out.write(byteArrayOf(5, 1, 0))
-                out.flush()
-                val greeting = ByteArray(2)
-                var read = ins.read(greeting)
-                if (read < 2 || greeting[0].toInt() != 5) {
-                    socksSocket.close()
-                    return@Thread
-                }
-                
-                val req = java.io.ByteArrayOutputStream()
-                req.write(5)
-                req.write(1) // CONNECT
-                req.write(0)
-                req.write(1) // IPv4 Address Type
-                req.write(session.serverIp)
-                req.write((dstPort ushr 8) and 0xFF)
-                req.write(dstPort and 0xFF)
-                out.write(req.toByteArray())
-                out.flush()
-                
-                val reply = ByteArray(10)
-                read = ins.read(reply)
-                if (read < 4 || reply[1].toInt() != 0) {
-                    socksSocket.close()
-                    return@Thread
-                }
-                
-                session.socket = socksSocket
-                
-                val readBuf = ByteArray(4096)
-                while (isTunRunning && !session.isClosed) {
-                    val r = ins.read(readBuf)
-                    if (r > 0) {
-                        sendTcpDataToTun(session, readBuf, r, outStream)
-                    } else if (r < 0) {
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                // SOCKS bridge connection failed or closed
-            } finally {
-                handleTcpClose(key)
-            }
-        }.start()
     }
 
-    private fun handleTcpData(
-        buf: ByteArray,
-        ihl: Int,
-        tcpHeaderLen: Int,
-        payloadLen: Int,
-        key: String,
-        outStream: java.io.FileOutputStream
-    ) {
-        val session = tcpSessions[key] ?: return
-        if (session.isClosed) return
-        
-        val clientSeq = read32(buf, ihl + 4)
-        session.myAck = clientSeq + payloadLen
-        
-        sendEmptyAckToTun(session, outStream)
-        
-        val payload = ByteArray(payloadLen)
-        System.arraycopy(buf, ihl + tcpHeaderLen, payload, 0, payloadLen)
-        
-        Thread {
-            try {
-                session.socket?.getOutputStream()?.apply {
-                    write(payload)
-                    flush()
-                }
-            } catch (e: Exception) {
-                LogsModule.error("TCP", "Failed to write payload to SOCKS link: ${e.message}")
-            }
-        }.start()
-    }
-
-    private fun sendEmptyAckToTun(session: TcpSession, outStream: java.io.FileOutputStream) {
-        val response = ByteArray(40)
-        response[0] = 0x45.toByte() // Vers: 4, IHL: 5
-        response[1] = 0x00.toByte() // TOS
-        write16(response, 2, 40) // Total length
-        write16(response, 4, (Math.random() * 50000).toInt()) // Identification
-        write16(response, 6, 0)
-        response[8] = 64.toByte() // TTL
-        response[9] = 6.toByte() // Protocol TCP
-        System.arraycopy(session.serverIp, 0, response, 12, 4)
-        System.arraycopy(session.clientIp, 0, response, 16, 4)
-        
-        write16(response, 20, session.serverPort) // Source Port
-        write16(response, 22, session.clientPort) // Dest Port
-        write32(response, 24, session.mySeq) // Seq Number
-        write32(response, 28, session.myAck) // Ack Number
-        response[32] = 0x50.toByte() // TCP Header Length: 20 bytes
-        response[33] = 0x10.toByte() // Flags: ACK
-        write16(response, 34, 65535) // Window Size
-        response[36] = 0
-        response[37] = 0
-        write16(response, 38, 0)
-        
-        val ipChecksum = calculateChecksum(response, 0, 20)
-        write16(response, 10, ipChecksum)
-        
-        val pseudoHeader = ByteArray(12 + 20)
-        System.arraycopy(session.serverIp, 0, pseudoHeader, 0, 4)
-        System.arraycopy(session.clientIp, 0, pseudoHeader, 4, 4)
-        pseudoHeader[8] = 0
-        pseudoHeader[9] = 6
-        write16(pseudoHeader, 10, 20)
-        System.arraycopy(response, 20, pseudoHeader, 12, 20)
-        val tcpChecksum = calculateChecksum(pseudoHeader, 0, pseudoHeader.size)
-        write16(response, 36, tcpChecksum)
-        
-        try {
-            outStream.write(response)
-            outStream.flush()
-        } catch (e: Exception) {}
-    }
-
-    private fun sendTcpDataToTun(
-        session: TcpSession,
-        payload: ByteArray,
-        payloadLen: Int,
-        outStream: java.io.FileOutputStream
-    ) {
-        val totalLength = 40 + payloadLen
-        val response = ByteArray(totalLength)
-        
-        response[0] = 0x45.toByte()
-        response[1] = 0x00.toByte()
-        write16(response, 2, totalLength)
-        write16(response, 4, (Math.random() * 50000).toInt())
-        write16(response, 6, 0)
-        response[8] = 64.toByte()
-        response[9] = 6.toByte()
-        System.arraycopy(session.serverIp, 0, response, 12, 4)
-        System.arraycopy(session.clientIp, 0, response, 16, 4)
-        
-        write16(response, 20, session.serverPort)
-        write16(response, 22, session.clientPort)
-        write32(response, 24, session.mySeq)
-        write32(response, 28, session.myAck)
-        response[32] = 0x50.toByte()
-        response[33] = 0x18.toByte() // PSH | ACK
-        write16(response, 34, 65535)
-        response[36] = 0
-        response[37] = 0
-        write16(response, 38, 0)
-        
-        System.arraycopy(payload, 0, response, 40, payloadLen)
-        
-        val ipChecksum = calculateChecksum(response, 0, 20)
-        write16(response, 10, ipChecksum)
-        
-        val pseudoHeader = ByteArray(12 + 20 + payloadLen)
-        System.arraycopy(session.serverIp, 0, pseudoHeader, 0, 4)
-        System.arraycopy(session.clientIp, 0, pseudoHeader, 4, 4)
-        pseudoHeader[8] = 0
-        pseudoHeader[9] = 6
-        write16(pseudoHeader, 10, 20 + payloadLen)
-        System.arraycopy(response, 20, pseudoHeader, 12, 20 + payloadLen)
-        val tcpChecksum = calculateChecksum(pseudoHeader, 0, pseudoHeader.size)
-        write16(response, 36, tcpChecksum)
-        
-        session.mySeq += payloadLen
-        
-        try {
-            outStream.write(response)
-            outStream.flush()
-        } catch (e: Exception) {}
-    }
-
-    private fun handleTcpClose(key: String) {
-        val session = tcpSessions.remove(key) ?: return
-        session.isClosed = true
-        try { session.socket?.close() } catch (e: java.lang.Exception) {}
-    }
-
-    private fun forwardDnsPacket(
-        buf: ByteArray,
-        ihl: Int,
-        length: Int,
-        outStream: java.io.FileOutputStream
-    ) {
-        val payloadLen = length - ihl - 8
-        if (payloadLen <= 0) return
-        
-        val dnsQuery = ByteArray(payloadLen)
-        System.arraycopy(buf, ihl + 8, dnsQuery, 0, payloadLen)
-        
-        Thread {
-            var dnsSocket: java.net.DatagramSocket? = null
-            try {
-                dnsSocket = java.net.DatagramSocket()
-                protect(dnsSocket)
-                dnsSocket.soTimeout = 2500
-                
-                val packetOut = java.net.DatagramPacket(dnsQuery, payloadLen, java.net.InetAddress.getByName("1.1.1.1"), 53)
-                dnsSocket.send(packetOut)
-                
-                val responseBuf = ByteArray(2048)
-                val packetIn = java.net.DatagramPacket(responseBuf, responseBuf.size)
-                dnsSocket.receive(packetIn)
-                
-                val respLen = packetIn.length
-                if (respLen > 0) {
-                    sendUdpPacketToTun(buf, ihl, responseBuf, respLen, outStream)
-                }
-            } catch (e: Exception) {
-                buildGenericDnsMockResponse(buf, ihl, dnsQuery, outStream)
-            } finally {
-                try { dnsSocket?.close() } catch (e: java.lang.Exception) {}
-            }
-        }.start()
-    }
-
-    private fun buildGenericDnsMockResponse(
-        buf: ByteArray,
-        ihl: Int,
-        dnsQuery: ByteArray,
-        outStream: java.io.FileOutputStream
-    ) {
-        if (dnsQuery.size < 12) return
-        val out = java.io.ByteArrayOutputStream()
-        
-        val respBytes = dnsQuery.copyOf(dnsQuery.size)
-        respBytes[2] = 0x81.toByte()
-        respBytes[3] = 0x80.toByte()
-        respBytes[6] = 0.toByte()
-        respBytes[7] = 1.toByte()
-        out.write(respBytes)
-        
-        val extra = byteArrayOf(
-            0xC0.toByte(), 0x0C.toByte(), // CNAME Pointer Name (12)
-            0x00.toByte(), 0x01.toByte(), // Type IP A: 1
-            0x00.toByte(), 0x01.toByte(), // Class IN: 1
-            0x00.toByte(), 0x00.toByte(), 0x02.toByte(), 0x58.toByte(), // TTL: 600
-            0x00.toByte(), 0x04.toByte(), // Data len: 4
-            104.toByte(), 26.toByte(), 12.toByte(), 31.toByte() // IP Address Google/Cloudflare representative 104.26.12.31
-        )
-        out.write(extra)
-        
-        val rBytes = out.toByteArray()
-        sendUdpPacketToTun(buf, ihl, rBytes, rBytes.size, outStream)
-    }
-
-    private fun forwardUdpPacket(
-        buf: ByteArray,
-        ihl: Int,
-        length: Int,
-        dstIp: String,
-        dstPort: Int,
-        outStream: java.io.FileOutputStream
-    ) {
-        val payloadLen = length - ihl - 8
-        if (payloadLen <= 0) return
-        
-        val payload = ByteArray(payloadLen)
-        System.arraycopy(buf, ihl + 8, payload, 0, payloadLen)
-        
-        Thread {
-            var udpSocket: java.net.DatagramSocket? = null
-            try {
-                udpSocket = java.net.DatagramSocket()
-                protect(udpSocket)
-                udpSocket.soTimeout = 2000
-                
-                val packetOut = java.net.DatagramPacket(payload, payloadLen, java.net.InetAddress.getByName(dstIp), dstPort)
-                udpSocket.send(packetOut)
-                
-                val responseBuf = ByteArray(4096)
-                val packetIn = java.net.DatagramPacket(responseBuf, responseBuf.size)
-                udpSocket.receive(packetIn)
-                
-                val respLen = packetIn.length
-                if (respLen > 0) {
-                    sendUdpPacketToTun(buf, ihl, responseBuf, respLen, outStream)
-                }
-            } catch (e: Exception) {
-                // Drop safely
-            } finally {
-                try { udpSocket?.close() } catch (e: java.lang.Exception) {}
-            }
-        }.start()
-    }
-
-    private fun sendUdpPacketToTun(
-        buf: ByteArray,
-        ihl: Int,
-        payload: ByteArray,
-        payloadLen: Int,
-        outStream: java.io.FileOutputStream
-    ) {
-        val totalLength = 20 + 8 + payloadLen
-        val response = ByteArray(totalLength)
-        
-        response[0] = 0x45.toByte()
-        response[1] = 0x00.toByte()
-        write16(response, 2, totalLength)
-        write16(response, 4, (Math.random() * 50000).toInt())
-        write16(response, 6, 0)
-        response[8] = 64.toByte()
-        response[9] = 17.toByte() // UDP Protocol: 17
-        
-        System.arraycopy(buf, 16, response, 12, 4) // Source is Dest
-        System.arraycopy(buf, 12, response, 16, 4) // Dest is Source
-        
-        response[20] = buf[ihl + 2]
-        response[21] = buf[ihl + 3]
-        response[22] = buf[ihl]
-        response[23] = buf[ihl + 1]
-        write16(response, 24, 8 + payloadLen)
-        response[26] = 0
-        response[27] = 0
-        
-        System.arraycopy(payload, 0, response, 28, payloadLen)
-        
-        val ipChecksum = calculateChecksum(response, 0, 20)
-        write16(response, 10, ipChecksum)
-        
-        try {
-            outStream.write(response)
-            outStream.flush()
-        } catch (e: Exception) {}
-    }
-
-    private fun read32(buf: ByteArray, offset: Int): Long {
-        return ((buf[offset].toLong() and 0xFF) shl 24) or
-               ((buf[offset + 1].toLong() and 0xFF) shl 16) or
-               ((buf[offset + 2].toLong() and 0xFF) shl 8) or
-               (buf[offset + 3].toLong() and 0xFF)
-    }
-
-    private fun write16(buf: ByteArray, offset: Int, value: Int) {
-        buf[offset] = ((value ushr 8) and 0xFF).toByte()
-        buf[offset + 1] = (value and 0xFF).toByte()
-    }
-
-    private fun write32(buf: ByteArray, offset: Int, value: Long) {
-        buf[offset] = ((value ushr 24) and 0xFF).toByte()
-        buf[offset + 1] = ((value ushr 16) and 0xFF).toByte()
-        buf[offset + 2] = ((value ushr 8) and 0xFF).toByte()
-        buf[offset + 3] = (value and 0xFF).toByte()
-    }
-
-    private fun calculateChecksum(buf: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0
-        var i = offset
-        val end = offset + length - 1
-        while (i < end) {
-            val word = ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
-            sum += word
-            i += 2
+    private fun stopTun2Socks() {
+        if (tun2socksProcess != null) {
+            LogsModule.info("VPN", "Stopping tun2socks native process...")
+            tun2socksProcess?.destroy()
+            tun2socksProcess = null
+            tun2socksLogThread?.interrupt()
+            tun2socksLogThread = null
         }
-        if (i == end) {
-            sum += (buf[i].toInt() and 0xFF) shl 8
-        }
-        while (sum ushr 16 != 0) {
-            sum = (sum and 0xFFFF) + (sum ushr 16)
-        }
-        return (sum.inv()) and 0xFFFF
     }
 
     private fun validateActiveConnection(onValidated: (Boolean, String?) -> Unit) {
         val validationThread = Thread {
-            try { Thread.sleep(1500) } catch (e: Exception) {}
+            try { Thread.sleep(2000) } catch (e: Exception) {}
             
-            LogsModule.info("Validation", "[Connection Validation] Setting up real HTTP validation call over SOCKS5 bridge...")
+            LogsModule.info("Validation", "[Connection Validation] Starting active trace audits...")
+            
+            var ipBefore = "Unknown"
+            var ipAfter = "Unknown"
             var verified = false
             var errorMsg: String? = null
             
+            // 1. Get Public IP BEFORE VPN (direct connection)
+            try {
+                val url = java.net.URL("https://ifconfig.io/ip")
+                val connection = url.openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 3000
+                connection.readTimeout = 3000
+                if (connection.responseCode == 200) {
+                    ipBefore = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                LogsModule.warning("Validation", "Could not check IP before VPN: ${e.message}")
+            }
+            LogsModule.info("Validation", "Public IP BEFORE VPN (Direct): $ipBefore")
+            
+            // 2. Get Public IP AFTER VPN (through SOCKS/HTTP proxy)
+            try {
+                val url = java.net.URL("https://ifconfig.io/ip")
+                val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", 10809))
+                val connection = url.openConnection(proxy) as java.net.HttpURLConnection
+                connection.connectTimeout = 4000
+                connection.readTimeout = 4000
+                if (connection.responseCode == 200) {
+                    ipAfter = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                LogsModule.warning("Validation", "Could not check IP after VPN: ${e.message}")
+            }
+            LogsModule.info("Validation", "Public IP AFTER VPN (Proxy): $ipAfter")
+            
+            // 3. Verify Google 204
             try {
                 val url = java.net.URL("https://www.google.com/generate_204")
                 val proxy = java.net.Proxy(java.net.Proxy.Type.HTTP, java.net.InetSocketAddress("127.0.0.1", 10809))
                 val connection = url.openConnection(proxy) as java.net.HttpURLConnection
                 connection.connectTimeout = 4000
                 connection.readTimeout = 4000
-                connection.requestMethod = "GET"
-                
                 val responseCode = connection.responseCode
-                LogsModule.info("Validation", "[Connection Validation] Complete tunnel output loop verification. Response: $responseCode")
                 if (responseCode == 204 || responseCode == 200) {
                     verified = true
                     LogsModule.info("Validation", "[Connection Validation] Direct VPN Tunnel verification succeeded! Traffic successfully passes through the SOCKS proxy.")
@@ -851,7 +414,6 @@ class ProtectoVpnService : VpnService() {
                 }
                 connection.disconnect()
             } catch (e: Exception) {
-                // SOCKS proxy link or routing validation failed
                 errorMsg = "Direct SOCKS validation trace timed out: ${e.message}"
                 LogsModule.error("Validation", "[Connection Validation] Tunnel output verification error: $errorMsg")
             }
@@ -861,7 +423,8 @@ class ProtectoVpnService : VpnService() {
                     tunToSocksVerified = true,
                     socksToOutboundVerified = true,
                     outboundToRemoteVerified = true,
-                    currentOutboundState = "VPN TRAFFIC FLOW = VERIFIED"
+                    currentOutboundState = "VPN TRAFFIC FLOW = VERIFIED",
+                    lastConnectionError = "IP Before: $ipBefore | IP After: $ipAfter"
                 )
             } else {
                 com.example.architecture.XrayManager.updateDiagnostics(
@@ -877,6 +440,7 @@ class ProtectoVpnService : VpnService() {
     }
 
     private fun stopVpnTunnel() {
+        stopTun2Socks()
         isTunRunning = false
         tunThread?.interrupt()
         tunThread = null

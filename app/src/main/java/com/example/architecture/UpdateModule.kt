@@ -141,6 +141,33 @@ object XrayVersionCenter {
             try {
                 Runtime.getRuntime().exec("chmod 755 ${destFile.absolutePath}").waitFor()
             } catch (e: Exception) {}
+
+            // Extract tun2socks binary
+            val tun2socksAssetName = when (cpuArch) {
+                "arm64-v8a" -> "tun2socks_arm64-v8a"
+                "armeabi-v7a" -> "tun2socks_armeabi-v7a"
+                "x86_64" -> "tun2socks_x86_64"
+                else -> "tun2socks_arm64-v8a"
+            }
+            val destTun2SocksFile = File(binDir, "tun2socks")
+            try {
+                val insT2s = context.assets.open(tun2socksAssetName)
+                val outT2s = FileOutputStream(destTun2SocksFile)
+                val bufferT2s = ByteArray(4096)
+                var bytesReadT2s: Int
+                while (insT2s.read(bufferT2s).also { bytesReadT2s = it } != -1) {
+                    outT2s.write(bufferT2s, 0, bytesReadT2s)
+                }
+                insT2s.close()
+                outT2s.close()
+                destTun2SocksFile.setExecutable(true, false)
+                destTun2SocksFile.setReadable(true, false)
+                destTun2SocksFile.setWritable(true, true)
+                Runtime.getRuntime().exec("chmod 755 ${destTun2SocksFile.absolutePath}").waitFor()
+                LogsModule.info("Binary", "[Binary Extraction] Extracted tun2socks successfully from asset: $tun2socksAssetName")
+            } catch (e: Exception) {
+                LogsModule.error("Binary", "[Binary Extraction] Failed to extract tun2socks binary: ${e.message}")
+            }
             
             executableState = "YES"
 
