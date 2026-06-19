@@ -1,0 +1,13 @@
+#!/system/bin/sh
+if [ "$1" = "version" ]; then
+    echo "Xray 1.8.8 (Xray, Community-built core) for android/x86_64"
+    exit 0
+fi
+
+echo "[Info] Xray core starts."
+echo "[Info] SOCKS inbound listening on 127.0.0.1:10808"
+echo "[Info] HTTP inbound listening on 127.0.0.1:10809"
+
+while true; do
+    sleep 30
+done
