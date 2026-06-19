@@ -543,12 +543,11 @@ object XrayManager {
         if (config.networkType == "ws") {
             val wsSettings = JSONObject()
             wsSettings.put("path", config.path)
-            val headers = JSONObject()
-            val wsHost = config.host.ifEmpty { config.sni }
+            val wsHost = config.host.ifEmpty { config.sni.ifEmpty { config.address } }
             if (wsHost.isNotEmpty()) {
-                headers.put("Host", wsHost)
+                // Modern Xray 26+ format: use top-level "host" field
+                wsSettings.put("host", wsHost)
             }
-            wsSettings.put("headers", headers)
             streamSettings.put("wsSettings", wsSettings)
         }
         
