@@ -319,7 +319,7 @@ class ProtectoVpnService : VpnService() {
             tun2socksBinary.absolutePath,
             "-device", "fd://$fd",
             "-proxy", "socks5://127.0.0.1:10808",
-            "-loglevel", "warning"
+            "-loglevel", "warn"
         )
         LogsModule.info("VPN", "Starting tun2socks command: ${cmd.joinToString(" ")}")
         try {
@@ -357,7 +357,7 @@ class ProtectoVpnService : VpnService() {
 
     private fun validateActiveConnection(onValidated: (Boolean, String?) -> Unit) {
         val validationThread = Thread {
-            try { Thread.sleep(2000) } catch (e: Exception) {}
+            try { Thread.sleep(5000) } catch (e: Exception) {}
             
             LogsModule.info("Validation", "[Connection Validation] Starting active trace audits...")
             
