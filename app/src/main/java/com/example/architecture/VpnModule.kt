@@ -113,6 +113,7 @@ object VpnModuleManager {
 class ProtectoVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var tunFdDup: ParcelFileDescriptor? = null
     private val notificationId = 88291
     private val channelId = "protecto_vpn_channel"
     private var tunThread: Thread? = null
@@ -284,6 +285,10 @@ class ProtectoVpnService : VpnService() {
                     LogsModule.warning("Tunnel", "Could not dup TUN fd via PFD ($fdInt): ${e.message}. Falling back.")
                     null
                 }
+                
+                // Store PFD in a class-level variable to prevent the Garbage Collector
+                // from finalizing it and closing the underlying file descriptor!
+                this.tunFdDup = inheritablePfd
 
                 val inheritableFd: Int = if (inheritablePfd != null) {
                     inheritablePfd.fd
@@ -463,6 +468,10 @@ class ProtectoVpnService : VpnService() {
         tunThread?.interrupt()
         tunThread = null
         XrayManager.stopCore()
+        try {
+            tunFdDup?.close()
+        } catch (e: Exception) {}
+        tunFdDup = null
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
