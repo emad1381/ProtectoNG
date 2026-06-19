@@ -360,7 +360,7 @@ class ProtectoVpnService : VpnService() {
                                     val tcpHeaderLen = ((buffer[ihl + 12].toInt() ushr 4) and 0x0F) * 4
                                     val payloadLen = length - ihl - tcpHeaderLen
                                     if (payloadLen > 0) {
-                                        handleTcpData(buffer, ihl, tcpHeaderLen, payloadLen, tcpKey)
+                                        handleTcpData(buffer, ihl, tcpHeaderLen, payloadLen, tcpKey, outputStream)
                                         StatisticsModule.tickUpTunnelTraffic(0L, payloadLen.toLong())
                                     }
                                 }
@@ -513,10 +513,16 @@ class ProtectoVpnService : VpnService() {
         ihl: Int,
         tcpHeaderLen: Int,
         payloadLen: Int,
-        key: String
+        key: String,
+        outStream: java.io.FileOutputStream
     ) {
         val session = tcpSessions[key] ?: return
         if (session.isClosed) return
+        
+        val clientSeq = read32(buf, ihl + 4)
+        session.myAck = clientSeq + payloadLen
+        
+        sendEmptyAckToTun(session, outStream)
         
         val payload = ByteArray(payloadLen)
         System.arraycopy(buf, ihl + tcpHeaderLen, payload, 0, payloadLen)
@@ -531,6 +537,48 @@ class ProtectoVpnService : VpnService() {
                 LogsModule.error("TCP", "Failed to write payload to SOCKS link: ${e.message}")
             }
         }.start()
+    }
+
+    private fun sendEmptyAckToTun(session: TcpSession, outStream: java.io.FileOutputStream) {
+        val response = ByteArray(40)
+        response[0] = 0x45.toByte() // Vers: 4, IHL: 5
+        response[1] = 0x00.toByte() // TOS
+        write16(response, 2, 40) // Total length
+        write16(response, 4, (Math.random() * 50000).toInt()) // Identification
+        write16(response, 6, 0)
+        response[8] = 64.toByte() // TTL
+        response[9] = 6.toByte() // Protocol TCP
+        System.arraycopy(session.serverIp, 0, response, 12, 4)
+        System.arraycopy(session.clientIp, 0, response, 16, 4)
+        
+        write16(response, 20, session.serverPort) // Source Port
+        write16(response, 22, session.clientPort) // Dest Port
+        write32(response, 24, session.mySeq) // Seq Number
+        write32(response, 28, session.myAck) // Ack Number
+        response[32] = 0x50.toByte() // TCP Header Length: 20 bytes
+        response[33] = 0x10.toByte() // Flags: ACK
+        write16(response, 34, 65535) // Window Size
+        response[36] = 0
+        response[37] = 0
+        write16(response, 38, 0)
+        
+        val ipChecksum = calculateChecksum(response, 0, 20)
+        write16(response, 10, ipChecksum)
+        
+        val pseudoHeader = ByteArray(12 + 20)
+        System.arraycopy(session.serverIp, 0, pseudoHeader, 0, 4)
+        System.arraycopy(session.clientIp, 0, pseudoHeader, 4, 4)
+        pseudoHeader[8] = 0
+        pseudoHeader[9] = 6
+        write16(pseudoHeader, 10, 20)
+        System.arraycopy(response, 20, pseudoHeader, 12, 20)
+        val tcpChecksum = calculateChecksum(pseudoHeader, 0, pseudoHeader.size)
+        write16(response, 36, tcpChecksum)
+        
+        try {
+            outStream.write(response)
+            outStream.flush()
+        } catch (e: Exception) {}
     }
 
     private fun sendTcpDataToTun(
@@ -803,15 +851,9 @@ class ProtectoVpnService : VpnService() {
                 }
                 connection.disconnect()
             } catch (e: Exception) {
-                // SOCKS proxy link or routing validation failed - fallback to ensure connection verification
+                // SOCKS proxy link or routing validation failed
                 errorMsg = "Direct SOCKS validation trace timed out: ${e.message}"
                 LogsModule.error("Validation", "[Connection Validation] Tunnel output verification error: $errorMsg")
-                
-                // Active fallbacks to gracefully verified state if Xray process is fully operational
-                if (com.example.architecture.XrayManager.status.value == com.example.architecture.XrayStatus.RUNNING) {
-                    LogsModule.info("Validation", "[Connection Validation] Xray core process state RUNNING. Accept tunnel verification via backup handshake trace.")
-                    verified = true
-                }
             }
             
             if (verified) {

@@ -328,16 +328,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
         statsJob = viewModelScope.launch {
             while (true) {
-                val systemState = com.example.architecture.VpnModuleManager.serviceState.value
-                val dlSpeed = if (systemState == VpnState.CONNECTED) {
-                    kotlin.random.Random.nextLong(200 * 1024, 12 * 1024 * 1024)
-                } else 0L
-
-                val ulSpeed = if (systemState == VpnState.CONNECTED) {
-                    kotlin.random.Random.nextLong(20 * 1024, 1200 * 1024)
-                } else 0L
-
-                com.example.architecture.StatisticsModule.tickUpTraffic(dlSpeed, ulSpeed)
+                val speeds = com.example.architecture.StatisticsModule.consumeSpeedWindow()
+                val dlSpeed = speeds.first
+                val ulSpeed = speeds.second
 
                 val isEng = selectLanguage.value == "English"
                 _downloadSpeed.value = com.example.architecture.StatisticsModule.formatBytes(dlSpeed, isSpeed = true, isFarsi = !isEng)
@@ -587,18 +580,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun getTrafficStats(): Triple<String, String, String> {
-        var dlTotal = 0.0f
-        var ulTotal = 0.0f
-
-        if (_vpnState.value == VpnState.CONNECTED) {
-            val liveUsage = (connectedSeconds * 0.15f) / 1024f
-            dlTotal += liveUsage * 0.8f
-            ulTotal += liveUsage * 0.2f
-        }
+        val dlBytes = com.example.architecture.StatisticsModule.sessionDownload.value
+        val ulBytes = com.example.architecture.StatisticsModule.sessionUpload.value
+        
+        val dlTotal = dlBytes / (1024.0f * 1024.0f * 1024.0f)
+        val ulTotal = ulBytes / (1024.0f * 1024.0f * 1024.0f)
+        val total = (dlBytes + ulBytes) / (1024.0f * 1024.0f * 1024.0f)
 
         val df = String.format("%.2f", dlTotal)
         val uf = String.format("%.2f", ulTotal)
-        val tf = String.format("%.2f", dlTotal + ulTotal)
+        val tf = String.format("%.2f", total)
 
         val unitSuffix = if (selectLanguage.value == "English") " GB" else " گیگابایت"
 

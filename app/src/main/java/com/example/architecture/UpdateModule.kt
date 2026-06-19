@@ -14,6 +14,12 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import java.io.InputStream
+import java.util.zip.ZipInputStream
+import kotlinx.coroutines.withContext
 
 object XrayVersionCenter {
     private const val PREFS_NAME = "xray_update_prefs"
@@ -181,45 +187,108 @@ object XrayVersionCenter {
         return Pair(true, "Success")
     }
 
+    var stderrOutputStr = "None"
+    var exitCodeStr = "None"
+
     private fun testBinaryExecution(binaryFile: File): Pair<Boolean, String> {
-        // Direct execution check first
+        val stdoutSb = StringBuilder()
+        val stderrSb = StringBuilder()
+        var exitCode = -1
+        
         try {
             val pb = ProcessBuilder(binaryFile.absolutePath, "version")
             val proc = pb.start()
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(proc.inputStream))
-            val output = reader.readLine()
-            proc.destroy()
-            if (output != null && output.lowercase().contains("xray")) {
-                return Pair(true, output.trim())
+            
+            val stdoutThread = Thread {
+                try {
+                    val reader = java.io.BufferedReader(java.io.InputStreamReader(proc.inputStream))
+                    var line = reader.readLine()
+                    while (line != null) {
+                        stdoutSb.append(line).append("\n")
+                        line = reader.readLine()
+                    }
+                } catch (e: Exception) {}
             }
-        } catch (e: Exception) {
-            // Log it and attempt shell interpreter execution as valid fallback
-        }
-
-        // Fallback executing script with sh interpreter (guarantees run under targetSdk=36 SELinux)
-        try {
-            val pb = ProcessBuilder("sh", binaryFile.absolutePath, "version")
-            val proc = pb.start()
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(proc.inputStream))
-            val output = reader.readLine()
-            proc.destroy()
-            if (output != null && output.lowercase().contains("xray")) {
-                return Pair(true, output.trim())
+            stdoutThread.start()
+            
+            val stderrThread = Thread {
+                try {
+                    val reader = java.io.BufferedReader(java.io.InputStreamReader(proc.errorStream))
+                    var line = reader.readLine()
+                    while (line != null) {
+                        stderrSb.append(line).append("\n")
+                        line = reader.readLine()
+                    }
+                } catch (e: Exception) {}
             }
+            stderrThread.start()
+            
+            stdoutThread.join(2000)
+            stderrThread.join(2000)
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                    exitCode = proc.exitValue()
+                } else {
+                    proc.destroyForcibly()
+                }
+            } else {
+                exitCode = proc.waitFor()
+            }
+            
+            val stdoutStr = stdoutSb.toString().trim()
+            val stderrStr = stderrSb.toString().trim()
+            
+            stderrOutputStr = stderrStr.ifEmpty { "None" }
+            exitCodeStr = exitCode.toString()
+            
+            val fullOutput = if (exitCode == 0 && stdoutStr.isNotEmpty()) {
+                "$stdoutStr (Exit: $exitCode, Stderr: $stderrStr)"
+            } else {
+                "Exit: $exitCode, Stdout: $stdoutStr, Stderr: $stderrStr"
+            }
+            versionOutputStr = fullOutput
+            
+            if (exitCode == 0 && stdoutStr.lowercase().contains("xray")) {
+                return Pair(true, fullOutput)
+            }
+            return Pair(false, fullOutput)
         } catch (e: Exception) {
-            return Pair(false, "Runtime Execution Block: ${e.message}")
+            val err = "Execution failed: ${e.message}"
+            versionOutputStr = err
+            stderrOutputStr = e.message ?: "Unknown error"
+            exitCodeStr = "-1"
+            return Pair(false, err)
         }
-
-        return Pair(false, "Empty output execution result.")
     }
 
     fun checkForUpdates(onCompleted: (Boolean, String) -> Unit) {
         CoroutineScope(Dispatchers.Main).launch {
             _updateStatus.value = "Checking"
             LogsModule.info("Update", "Connecting to Xray Update Manifest Repository...")
-            delay(1500)
             
-            val latestVersion = "v24.6.1"
+            val latestVersion = withContext(Dispatchers.IO) {
+                try {
+                    val client = OkHttpClient()
+                    val request = Request.Builder()
+                        .url("https://api.github.com/repos/XTLS/Xray-core/releases/latest")
+                        .header("User-Agent", "ProtectoNG-Client")
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val body = response.body?.string()
+                            if (!body.isNullOrEmpty()) {
+                                val json = JSONObject(body)
+                                json.optString("tag_name", "v1.8.4")
+                            } else "v1.8.4"
+                        } else "v1.8.4"
+                    }
+                } catch (e: Exception) {
+                    LogsModule.error("Update", "Failed to check update: ${e.message}")
+                    "v1.8.4"
+                }
+            }
+            
             LogsModule.info("Update", "Latest release found on remote: $latestVersion (Current: ${_installedVersion.value})")
             _updateStatus.value = "Idle"
             
@@ -234,49 +303,106 @@ object XrayVersionCenter {
             _updateStatus.value = "Downloading"
             _updateProgress.value = 0f
             LogsModule.info("Update", "Detected system arch compatibility: $cpuArch")
-            LogsModule.info("Update", "Beginning download package https://github.com/XTLS/Xray-core/releases/download/$targetVersion/xray-linux-$cpuArch.zip ...")
             
-            // Loop download progress
-            for (p in 1..100) {
-                delay(40)
-                _updateProgress.value = p / 100f
+            val packageName = when (cpuArch) {
+                "arm64-v8a" -> "Xray-android-arm64-v8a.zip"
+                "armeabi-v7a" -> "Xray-linux-arm32-v7a.zip"
+                "x86_64" -> "Xray-linux-64.zip"
+                else -> "Xray-android-arm64-v8a.zip"
             }
+            
+            val downloadUrl = "https://github.com/XTLS/Xray-core/releases/download/$targetVersion/$packageName"
+            LogsModule.info("Update", "Beginning download package $downloadUrl ...")
+            
+            val success = withContext(Dispatchers.IO) {
+                try {
+                    val client = OkHttpClient.Builder()
+                        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                    val request = Request.Builder()
+                        .url(downloadUrl)
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) {
+                            LogsModule.error("Update", "Server response code: ${response.code}")
+                            return@withContext false
+                        }
+                        
+                        val body = response.body ?: return@withContext false
+                        val contentLength = body.contentLength()
+                        val inputStream = body.byteStream()
+                        
+                        val binDir = File(context.filesDir, "xray_bin")
+                        if (!binDir.exists()) binDir.mkdirs()
+                        val destFile = File(binDir, "xray")
+                        
+                        val zipInput = ZipInputStream(inputStream)
+                        var entry = zipInput.nextEntry
+                        var extracted = false
+                        val buffer = ByteArray(4096)
+                        
+                        while (entry != null) {
+                            if (entry.name == "xray") {
+                                val outputStream = FileOutputStream(destFile)
+                                var bytesRead: Int
+                                var totalDownloaded = 0L
+                                while (zipInput.read(buffer).also { bytesRead = it } != -1) {
+                                    outputStream.write(buffer, 0, bytesRead)
+                                    totalDownloaded += bytesRead
+                                    if (contentLength > 0) {
+                                        val progress = totalDownloaded.toFloat() / contentLength
+                                        _updateProgress.value = progress
+                                    }
+                                }
+                                outputStream.close()
+                                extracted = true
+                                break
+                            }
+                            entry = zipInput.nextEntry
+                        }
+                        zipInput.close()
+                        
+                        if (extracted) {
+                            destFile.setExecutable(true, false)
+                            destFile.setReadable(true, false)
+                            destFile.setWritable(true, true)
+                            Runtime.getRuntime().exec("chmod 755 ${destFile.absolutePath}").waitFor()
+                            true
+                        } else {
+                            LogsModule.error("Update", "Could not find 'xray' executable in zip package")
+                            false
+                        }
+                    }
+                } catch (e: Exception) {
+                    LogsModule.error("Update", "Download or extraction failed: ${e.message}")
+                    false
+                }
+            }
+            
+            if (success) {
+                _updateStatus.value = "Success"
+                val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                val currentDateStr = df.format(Date())
+                
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_VERSION, targetVersion)
+                    .putString(KEY_LAST_UPDATE, currentDateStr)
+                    .apply()
 
-            _updateStatus.value = "Verifying"
-            LogsModule.info("Update", "Download successful. Size: 11.2 MB. Initiating file verification...")
-            delay(1000)
-            
-            val calculatedSha = "sha256:d8a23b98c39fa4219bbad394019ea81d9f8df818ba012a9e1026" + kotlin.random.Random.nextInt(100, 999)
-            LogsModule.debug("Update", "Local bundle hash check: $calculatedSha")
-            LogsModule.info("Update", "Cryptographic signature matches XTLS Official authority keys. Verification Passed.")
-            delay(500)
-
-            _updateStatus.value = "Installing"
-            LogsModule.info("Update", "Extracting binary files to /data/user/0/${context.packageName}/files/xray_bin...")
-            delay(800)
-            
-            // Perform rapid extraction & installation check
-            extractAndVerifyBinary(context)
-            delay(400)
-            
-            // Write config changes to persistent storage
-            val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-            val currentDateStr = df.format(Date())
-            
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_VERSION, targetVersion)
-                .putString(KEY_LAST_UPDATE, currentDateStr)
-                .apply()
-
-            _installedVersion.value = targetVersion
-            _lastUpdateTime.value = currentDateStr
-            _updateStatus.value = "Success"
-            LogsModule.info("Update", "Atomic replacement successful. Xray Core is updated to $targetVersion.")
-            
-            delay(1000)
-            _updateStatus.value = "Idle"
-            onFinished(true)
+                _installedVersion.value = targetVersion
+                _lastUpdateTime.value = currentDateStr
+                LogsModule.info("Update", "Atomic replacement successful. Xray Core is updated to $targetVersion.")
+                
+                delay(1000)
+                _updateStatus.value = "Idle"
+                onFinished(true)
+            } else {
+                _updateStatus.value = "Error"
+                LogsModule.error("Update", "Update installation failed.")
+                onFinished(false)
+            }
         }
     }
 
