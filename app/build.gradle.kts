@@ -1,3 +1,4 @@
+import java.io.File
 import java.net.URL
 import java.util.zip.ZipFile
 
@@ -140,31 +141,31 @@ abstract class DownloadCoreBinariesTask : org.gradle.api.DefaultTask() {
     val buildTmpDirFile = buildTmpDir.get().asFile
     
     abis.forEach { abi ->
-      val jniDir = java.io.File(jniLibsDirFile, abi)
+      val jniDir = File(jniLibsDirFile, abi)
       if (!jniDir.exists()) {
         jniDir.mkdirs()
       }
       
       // 1. Download Xray
-      val xrayDest = java.io.File(jniDir, "libxray.so")
+      val xrayDest = File(jniDir, "libxray.so")
       if (!xrayDest.exists()) {
         val xrayUrl = when (abi) {
           "arm64-v8a" -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-android-arm64-v8a.zip"
           "armeabi-v7a" -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-linux-arm32-v7a.zip"
           else -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-linux-64.zip"
         }
-        val tempZipFile = java.io.File(buildTmpDirFile, "xray-$abi.zip")
+        val tempZipFile = File(buildTmpDirFile, "xray-$abi.zip")
         tempZipFile.parentFile.mkdirs()
         
         println("Downloading official Xray binary for $abi from $xrayUrl ...")
         try {
-          java.net.URL(xrayUrl).openStream().use { input ->
+          URL(xrayUrl).openStream().use { input ->
             tempZipFile.outputStream().use { output ->
               input.copyTo(output)
             }
           }
           println("Unzipping xray binary...")
-          val zipFile = java.util.zip.ZipFile(tempZipFile)
+          val zipFile = ZipFile(tempZipFile)
           val entry = zipFile.getEntry("xray")
           if (entry != null) {
             zipFile.getInputStream(entry).use { entryInput ->
@@ -188,25 +189,25 @@ abstract class DownloadCoreBinariesTask : org.gradle.api.DefaultTask() {
       }
 
       // 2. Download tun2socks
-      val t2sDest = java.io.File(jniDir, "libtun2socks.so")
+      val t2sDest = File(jniDir, "libtun2socks.so")
       if (!t2sDest.exists()) {
         val t2sUrl = when (abi) {
           "arm64-v8a" -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-arm64.zip"
           "armeabi-v7a" -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-armv7.zip"
           else -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-amd64.zip"
         }
-        val tempZipFile = java.io.File(buildTmpDirFile, "t2s-$abi.zip")
+        val tempZipFile = File(buildTmpDirFile, "t2s-$abi.zip")
         tempZipFile.parentFile.mkdirs()
         
         println("Downloading official tun2socks binary for $abi from $t2sUrl ...")
         try {
-          java.net.URL(t2sUrl).openStream().use { input ->
+          URL(t2sUrl).openStream().use { input ->
             tempZipFile.outputStream().use { output ->
               input.copyTo(output)
             }
           }
           println("Unzipping tun2socks binary...")
-          val zipFile = java.util.zip.ZipFile(tempZipFile)
+          val zipFile = ZipFile(tempZipFile)
           val binaryName = when (abi) {
             "arm64-v8a" -> "tun2socks-linux-arm64"
             "armeabi-v7a" -> "tun2socks-linux-armv7"
