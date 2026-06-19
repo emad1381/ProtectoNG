@@ -2318,6 +2318,56 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            // Settings Section: System Diagnostics
+            var showDiagnosticsDialog by remember { mutableStateOf(false) }
+
+            Text(
+                text = if (isEng) "System Diagnostics" else "عیب‌یابی سیستم",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = SecondaryCyan,
+                fontFamily = FontFamily.SansSerif,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { showDiagnosticsDialog = true },
+                testTag = "system_diagnostics_card"
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(imageVector = Icons.Filled.BugReport, contentDescription = "Diagnostics", tint = SecondaryCyan)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = if (isEng) "Core Binary Diagnostics" else "عیب‌یابی و آنالیز هسته",
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = if (isEng) "Run complete ELF, permission, and execution audit checks" else "بررسی فایل ELF، دسترسی‌ها و اجرای مستقیم هسته",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.SansSerif
+                            )
+                        }
+                    }
+                    Icon(imageVector = Icons.Filled.ChevronLeft, contentDescription = "View", tint = TextSecondary)
+                }
+            }
+
+            if (showDiagnosticsDialog) {
+                DiagnosticsDialog(currentLang = currentLang, onDismiss = { showDiagnosticsDialog = false })
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
             // Settings Section: About Program
             Text(text = if (isEng) "About Protecto" else "درباره برنامه", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = SecondaryCyan, fontFamily = FontFamily.SansSerif, modifier = Modifier.padding(bottom = 8.dp))
 
@@ -3864,6 +3914,133 @@ fun JsonConfigViewerDialog(
                         modifier = Modifier.weight(0.8f)
                     ) {
                         Text(if (currentLang == "English") "Close" else "بستن", color = TextPrimary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DiagnosticsDialog(currentLang: String, onDismiss: () -> Unit) {
+    val auditLogs by com.example.architecture.XrayVersionCenter.auditLogs.collectAsState()
+    val isEng = currentLang == "English"
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = DarkSurface,
+            border = BorderStroke(1.2.dp, GlassBorderColor),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f)
+                .padding(8.dp)
+                .testTag("diagnostics_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isEng) "Core Binary Diagnostics" else "آنالیز و عیب‌یابی هسته",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(imageVector = Icons.Filled.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                Divider(color = GlassBorderColor, thickness = 1.dp, modifier = Modifier.padding(vertical = 10.dp))
+
+                // Scrollable content
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    item {
+                        // Overview info
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0x07FFFFFF), RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = "Path: ${com.example.architecture.XrayVersionCenter.binaryPathStr}",
+                                color = TextPrimary,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            Text(
+                                text = "Found: ${com.example.architecture.XrayVersionCenter.binaryFoundState} | Executable: ${com.example.architecture.XrayVersionCenter.executableState} | ABI Match: ${com.example.architecture.XrayVersionCenter.abiMatchState}",
+                                color = if (com.example.architecture.XrayVersionCenter.executableState == "YES") ColorGreen else ColorRed,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Size: ${com.example.architecture.XrayVersionCenter.binaryFileSizeStr}",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                text = "Source: ${com.example.architecture.XrayVersionCenter.extractionSourceAsset}",
+                                color = SecondaryCyan,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    item {
+                        Text(
+                            text = if (isEng) "Direct Execution Output:" else "خروجی اجرای مستقیم:",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SecondaryCyan
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .border(1.dp, GlassBorderColor, RoundedCornerShape(12.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = com.example.architecture.XrayVersionCenter.versionOutputStr,
+                                color = Color.LightGray,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+
+                    item {
+                        Text(
+                            text = if (isEng) "System Audit Log Trace:" else "لاگ رهگیری و عیب‌یابی سیستم:",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SecondaryCyan
+                        )
+                    }
+
+                    items(auditLogs) { log ->
+                        Text(
+                            text = log,
+                            color = if (log.contains("FAILED") || log.contains("failed") || log.contains("Error") || log.contains("NO")) ColorRed else (if (log.startsWith("===") || log.startsWith("---")) SecondaryCyan else TextSecondary),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
                     }
                 }
             }

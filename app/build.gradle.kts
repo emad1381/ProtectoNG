@@ -123,57 +123,112 @@ dependencies {
   "ksp"(libs.moshi.kotlin.codegen)
 }
 
-tasks.register("downloadXrayBinaries") {
+tasks.register("downloadCoreBinaries") {
   group = "custom"
-  description = "Downloads official real Xray-core binaries from GitHub XTLS/Xray-core releases"
+  description = "Downloads official Xray-core (v26.6.1) and tun2socks (v2.6.0) binaries from GitHub releases"
   doLast {
-    val version = "v1.8.4"
+    val xrayVersion = "v26.6.1"
+    val t2sVersion = "v2.6.0"
     val abis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-    val assetsDir = file("src/main/assets")
-    if (!assetsDir.exists()) {
-      assetsDir.mkdirs()
-    }
     
     abis.forEach { abi ->
-      val zipUrl = "https://github.com/XTLS/Xray-core/releases/download/$version/Xray-android-$abi.zip"
-      val tempZipFile = file("build/tmp/xray-$abi.zip")
-      tempZipFile.parentFile.mkdirs()
+      val jniDir = file("src/main/jniLibs/$abi")
+      if (!jniDir.exists()) {
+        jniDir.mkdirs()
+      }
       
-      println("Downloading official Xray binary for $abi from $zipUrl ...")
-      try {
-        URL(zipUrl).openStream().use { input ->
-          tempZipFile.outputStream().use { output ->
-            input.copyTo(output)
-          }
+      // 1. Download Xray
+      val xrayDest = file("src/main/jniLibs/$abi/libxray.so")
+      if (!xrayDest.exists()) {
+        val xrayUrl = when (abi) {
+          "arm64-v8a" -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-android-arm64-v8a.zip"
+          "armeabi-v7a" -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-linux-arm32-v7a.zip"
+          else -> "https://github.com/XTLS/Xray-core/releases/download/$xrayVersion/Xray-linux-64.zip"
         }
-        println("Unzipping xray binary from downloaded package...")
-        val zipFile = ZipFile(tempZipFile)
-        val entries = zipFile.entries()
-        var found = false
-        while (entries.hasMoreElements()) {
-          val entry = entries.nextElement()
-          if (entry.name == "xray") {
-            val destFile = file("src/main/assets/xray_$abi")
+        val tempZipFile = file("build/tmp/xray-$abi.zip")
+        tempZipFile.parentFile.mkdirs()
+        
+        println("Downloading official Xray binary for $abi from $xrayUrl ...")
+        try {
+          URL(xrayUrl).openStream().use { input ->
+            tempZipFile.outputStream().use { output ->
+              input.copyTo(output)
+            }
+          }
+          println("Unzipping xray binary...")
+          val zipFile = ZipFile(tempZipFile)
+          val entry = zipFile.getEntry("xray")
+          if (entry != null) {
             zipFile.getInputStream(entry).use { entryInput ->
-              destFile.outputStream().use { entryOutput ->
+              xrayDest.outputStream().use { entryOutput ->
                 entryInput.copyTo(entryOutput)
               }
             }
-            println("Successfully extracted real Xray binary to ${destFile.absolutePath}")
-            found = true
-            break
+            println("Successfully saved Xray binary to ${xrayDest.absolutePath}")
+          } else {
+            throw GradleException("Could not find 'xray' in ZIP file for $abi")
           }
+          zipFile.close()
+        } catch (e: Exception) {
+          println("Error downloading Xray for $abi: ${e.message}")
+          throw e
+        } finally {
+          if (tempZipFile.exists()) tempZipFile.delete()
         }
-        zipFile.close()
-        if (!found) {
-          throw GradleException("Could not find 'xray' executable inside Xray-android-$abi.zip")
+      } else {
+        println("Xray binary for $abi already exists. Skipping.")
+      }
+
+      // 2. Download tun2socks
+      val t2sDest = file("src/main/jniLibs/$abi/libtun2socks.so")
+      if (!t2sDest.exists()) {
+        val t2sUrl = when (abi) {
+          "arm64-v8a" -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-arm64.zip"
+          "armeabi-v7a" -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-armv7.zip"
+          else -> "https://github.com/xjasonlyu/tun2socks/releases/download/$t2sVersion/tun2socks-linux-amd64.zip"
         }
-      } catch (e: Exception) {
-        println("ERROR downloading for $abi from GitHub: ${e.message}.")
-        throw e
-      } finally {
-        if (tempZipFile.exists()) tempZipFile.delete()
+        val tempZipFile = file("build/tmp/t2s-$abi.zip")
+        tempZipFile.parentFile.mkdirs()
+        
+        println("Downloading official tun2socks binary for $abi from $t2sUrl ...")
+        try {
+          URL(t2sUrl).openStream().use { input ->
+            tempZipFile.outputStream().use { output ->
+              input.copyTo(output)
+            }
+          }
+          println("Unzipping tun2socks binary...")
+          val zipFile = ZipFile(tempZipFile)
+          val binaryName = when (abi) {
+            "arm64-v8a" -> "tun2socks-linux-arm64"
+            "armeabi-v7a" -> "tun2socks-linux-armv7"
+            else -> "tun2socks-linux-amd64"
+          }
+          val entry = zipFile.getEntry(binaryName)
+          if (entry != null) {
+            zipFile.getInputStream(entry).use { entryInput ->
+              t2sDest.outputStream().use { entryOutput ->
+                entryInput.copyTo(entryOutput)
+              }
+            }
+            println("Successfully saved tun2socks binary to ${t2sDest.absolutePath}")
+          } else {
+            throw GradleException("Could not find '$binaryName' in ZIP file for $abi")
+          }
+          zipFile.close()
+        } catch (e: Exception) {
+          println("Error downloading tun2socks for $abi: ${e.message}")
+          throw e
+        } finally {
+          if (tempZipFile.exists()) tempZipFile.delete()
+        }
+      } else {
+        println("tun2socks binary for $abi already exists. Skipping.")
       }
     }
   }
+}
+
+tasks.named("preBuild") {
+  dependsOn("downloadCoreBinaries")
 }

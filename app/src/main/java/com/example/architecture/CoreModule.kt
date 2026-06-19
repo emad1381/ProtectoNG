@@ -261,7 +261,7 @@ object XrayManager {
                 LogsModule.error("Core", "Failed to write config JSON to disk: ${e.message}")
             }
 
-            val binaryPath = "/data/user/0/${context.packageName}/files/xray_bin/xray"
+            val binaryPath = java.io.File(context.applicationInfo.nativeLibraryDir, "libxray.so").absolutePath
             val cpuArch = XrayVersionCenter.detectCpuArchitecture()
             val startupCmd = "xray -config ${configDir.absolutePath}"
             

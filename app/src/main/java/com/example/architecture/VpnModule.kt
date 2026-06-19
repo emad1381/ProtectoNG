@@ -314,8 +314,7 @@ class ProtectoVpnService : VpnService() {
     }
 
     private fun startTun2Socks(fd: Int) {
-        val binDir = File(filesDir, "xray_bin")
-        val tun2socksBinary = File(binDir, "tun2socks")
+        val tun2socksBinary = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
         val cmd = listOf(
             tun2socksBinary.absolutePath,
             "-device", "fd://$fd",

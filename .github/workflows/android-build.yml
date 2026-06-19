@@ -45,39 +45,43 @@ jobs:
 
       - name: Download Xray and tun2socks Core Binaries
         run: |
-          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/armeabi-v7a
+          mkdir -p app/src/main/jniLibs/x86_64
           
-          echo "Downloading Xray arm64-v8a..."
-          curl -L -o xray-arm64.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-android-arm64-v8a.zip
-          unzip -p xray-arm64.zip xray > app/src/main/assets/xray_arm64-v8a
+          echo "Downloading Xray v26.6.1 arm64-v8a..."
+          curl -L -o xray-arm64.zip https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-android-arm64-v8a.zip
+          unzip -p xray-arm64.zip xray > app/src/main/jniLibs/arm64-v8a/libxray.so
           rm xray-arm64.zip
 
-          echo "Downloading Xray armeabi-v7a..."
-          curl -L -o xray-arm32.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-arm32-v7a.zip
-          unzip -p xray-arm32.zip xray > app/src/main/assets/xray_armeabi-v7a
+          echo "Downloading Xray v26.6.1 armeabi-v7a..."
+          curl -L -o xray-arm32.zip https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-linux-arm32-v7a.zip
+          unzip -p xray-arm32.zip xray > app/src/main/jniLibs/armeabi-v7a/libxray.so
           rm xray-arm32.zip
 
-          echo "Downloading Xray x86_64..."
-          curl -L -o xray-x64.zip https://github.com/XTLS/Xray-core/releases/download/v1.8.4/Xray-linux-64.zip
-          unzip -p xray-x64.zip xray > app/src/main/assets/xray_x86_64
+          echo "Downloading Xray v26.6.1 x86_64..."
+          curl -L -o xray-x64.zip https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-linux-64.zip
+          unzip -p xray-x64.zip xray > app/src/main/jniLibs/x86_64/libxray.so
           rm xray-x64.zip
 
-          echo "Downloading tun2socks arm64-v8a..."
+          echo "Downloading tun2socks v2.6.0 arm64-v8a..."
           curl -L -o t2s-arm64.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-arm64.zip
-          unzip -p t2s-arm64.zip tun2socks-linux-arm64 > app/src/main/assets/tun2socks_arm64-v8a
+          unzip -p t2s-arm64.zip tun2socks-linux-arm64 > app/src/main/jniLibs/arm64-v8a/libtun2socks.so
           rm t2s-arm64.zip
 
-          echo "Downloading tun2socks armeabi-v7a..."
+          echo "Downloading tun2socks v2.6.0 armeabi-v7a..."
           curl -L -o t2s-arm32.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-armv7.zip
-          unzip -p t2s-arm32.zip tun2socks-linux-armv7 > app/src/main/assets/tun2socks_armeabi-v7a
+          unzip -p t2s-arm32.zip tun2socks-linux-armv7 > app/src/main/jniLibs/armeabi-v7a/libtun2socks.so
           rm t2s-arm32.zip
 
-          echo "Downloading tun2socks x86_64..."
+          echo "Downloading tun2socks v2.6.0 x86_64..."
           curl -L -o t2s-x64.zip https://github.com/xjasonlyu/tun2socks/releases/download/v2.6.0/tun2socks-linux-amd64.zip
-          unzip -p t2s-x64.zip tun2socks-linux-amd64 > app/src/main/assets/tun2socks_x86_64
+          unzip -p t2s-x64.zip tun2socks-linux-amd64 > app/src/main/jniLibs/x86_64/libtun2socks.so
           rm t2s-x64.zip
 
-          ls -l app/src/main/assets/
+          ls -l app/src/main/jniLibs/arm64-v8a/
+          ls -l app/src/main/jniLibs/armeabi-v7a/
+          ls -l app/src/main/jniLibs/x86_64/
 
       - name: Build Debug and Release APKs
         run: ./gradlew assembleDebug assembleRelease
